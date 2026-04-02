@@ -39,16 +39,36 @@ from scipy.spatial import Voronoi, cKDTree
 # Voronoi tessellation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def make_voronoi_domains(N: int, n_domains: int, seed: int = 0) -> np.ndarray:
+def make_voronoi_domains(N: int, n_domains: int, seed: int = 0) -> tuple:
     """
     Generate a 3-D Voronoi domain map on an N^3 grid.
 
+    Places ``n_domains`` seed points uniformly at random in the simulation
+    box and assigns each voxel to the nearest seed point using a KD-tree
+    nearest-neighbour query.
+
+    Parameters
+    ----------
+    N : int
+        Number of grid points per spatial dimension.  The total grid is N^3.
+    n_domains : int
+        Number of Voronoi domains (nucleation sites).
+    seed : int, optional
+        Random seed for reproducible domain placement.  Default is 0.
+
     Returns
     -------
-    domain_map : ndarray (N, N, N), int
-        Integer label for each voxel (0 to n_domains-1).
-    centers : ndarray (n_domains, 3)
-        Seed point coordinates in [0, N)^3.
+    domain_map : ndarray, shape (N, N, N), dtype int
+        Integer domain label for each voxel, in the range [0, n_domains).
+    centers : ndarray, shape (n_domains, 3)
+        Seed point coordinates in [0, N)^3 used to generate the tessellation.
+
+    Notes
+    -----
+    This is a Euclidean (non-periodic) Voronoi tessellation.  Domains near
+    the box boundary may be slightly smaller than interior domains because
+    periodic images are not included.  For a fully periodic tessellation,
+    use ``scipy.spatial.Voronoi`` with replicated seed points.
     """
     rng = np.random.default_rng(seed)
     centers = rng.uniform(0, N, size=(n_domains, 3))
@@ -72,7 +92,33 @@ def make_voronoi_domains(N: int, n_domains: int, seed: int = 0) -> np.ndarray:
 
 def run_domain(P: float, N: int, lam: float, dt: float,
                n_steps: int, seed: int) -> np.ndarray:
-    """Run a single-domain phase-field simulation."""
+    """
+    Run a single-domain phase-field simulation with protein loading P.
+
+    A thin wrapper around :func:`phase2_curvature.run_with_curvature` that
+    runs one complete Allen-Cahn simulation for a single Voronoi domain.
+
+    Parameters
+    ----------
+    P : float
+        Dimensionless protein loading in [0, 1].
+    N : int
+        Number of grid points per spatial dimension.
+    lam : float
+        Allen-Cahn interface width parameter.
+    dt : float
+        Time step size.
+    n_steps : int
+        Number of time steps to evolve.
+    seed : int
+        Random seed for the initial condition.  Different seeds produce
+        different domain orientations.
+
+    Returns
+    -------
+    phi : ndarray, shape (N, N, N)
+        Final order-parameter field for this domain.
+    """
     from phase2_curvature import run_with_curvature
     return run_with_curvature(P=P, N=N, lam=lam, dt=dt,
                               n_steps=n_steps, seed=seed)
@@ -96,21 +142,53 @@ def assemble_polycrystal(
     """
     Generate a polycrystalline phase-field on an N^3 grid.
 
-    Each domain has:
-      - A random protein loading P_i ~ U[P_min, P_max]
-      - An independent random initial condition (different seed)
-      - Its own phase-field evolution
+    Each domain is assigned a random protein loading ``P_i ~ U[P_min, P_max]``
+    and an independent random initial condition (different seed), producing
+    domains with different orientations and morphologies.  The global field
+    is assembled by Voronoi assignment: each voxel takes the value from the
+    phase-field simulation of its nearest domain centre.
 
-    The global field is assembled by Voronoi assignment with soft blending.
+    Parameters
+    ----------
+    N : int, optional
+        Number of grid points per spatial dimension.  Default is 64.
+    n_domains : int, optional
+        Number of Voronoi domains.  Default is 8.
+    P_min : float, optional
+        Minimum protein loading for domain assignment.  Default is 0.4.
+    P_max : float, optional
+        Maximum protein loading for domain assignment.  Default is 0.9.
+    lam : float, optional
+        Allen-Cahn interface width parameter.  Default is 1.0.
+    dt : float, optional
+        Time step size.  Default is 0.04.
+    n_steps : int, optional
+        Number of time steps per domain simulation.  Default is 1500.
+    seed : int, optional
+        Master random seed.  Domain seeds are derived as ``seed + i + 1``
+        for domain ``i``.  Default is 42.
+    blend_width : int, optional
+        Width (in voxels) of the soft blending zone at domain boundaries.
+        Currently unused (hard assembly); reserved for future implementation.
+        Default is 2.
 
     Returns
     -------
-    phi_poly : ndarray (N, N, N)
+    phi_poly : ndarray, shape (N, N, N)
         Assembled polycrystalline scalar field.
-    domain_map : ndarray (N, N, N), int
-        Domain label per voxel.
-    P_values : ndarray (n_domains,)
-        Protein loading per domain.
+    domain_map : ndarray, shape (N, N, N), dtype int
+        Voronoi domain label for each voxel.
+    P_values : ndarray, shape (n_domains,)
+        Protein loading assigned to each domain.
+    centers : ndarray, shape (n_domains, 3)
+        Voronoi seed point coordinates.
+
+    Notes
+    -----
+    The ``blend_width`` parameter is reserved for a future soft-blending
+    implementation that would smooth the domain boundaries using a weighted
+    average of adjacent domain fields.  The current implementation uses
+    hard (sharp) boundaries.
     """
     rng = np.random.default_rng(seed)
     P_values = rng.uniform(P_min, P_max, size=n_domains)
@@ -141,17 +219,39 @@ def assemble_polycrystal(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def measure_domain_sizes(domain_map: np.ndarray, a_nm: float = 350.0,
-                         N_per_domain_target: int = 64) -> dict:
+                         N_per_domain_target: int = 64) -> tuple:
     """
-    Estimate the physical size of each domain.
+    Estimate the physical linear size of each Voronoi domain.
 
-    The grid spans N_per_domain_target * a_nm nm in each dimension.
-    Domain size = (voxel count / N^3)^(1/3) * L_phys
+    The simulation box has a total physical length of
+    ``L_nm = N_per_domain_target * a_nm`` nm in each dimension.
+    The volume of each domain is estimated from its voxel count, and
+    the linear size is taken as the cube root of the volume.
+
+    Parameters
+    ----------
+    domain_map : ndarray, shape (N, N, N), dtype int
+        Voronoi domain label for each voxel, as returned by
+        :func:`make_voronoi_domains`.
+    a_nm : float, optional
+        Physical lattice constant in nm.  Default is 350.0 nm.
+    N_per_domain_target : int, optional
+        Number of unit cells per box dimension used to set the physical
+        scale.  Default is 64.
 
     Returns
     -------
-    sizes_nm : dict {domain_id: size_nm}
-    sizes_um : dict {domain_id: size_um}
+    sizes_nm : dict
+        Mapping of ``{domain_id: size_nm}`` giving the estimated linear
+        domain size in nanometres.
+    sizes_um : dict
+        Same as ``sizes_nm`` but in micrometres (nm / 1000).
+
+    Notes
+    -----
+    The biological reference value for *Callophrys rubi* is a mean grain
+    diameter of ~5.4 μm (Morris 1975).  Domains in the range 3–7 μm are
+    considered consistent with observations.
     """
     N = domain_map.shape[0]
     L_nm = N_per_domain_target * a_nm   # total box size in nm
@@ -175,6 +275,24 @@ def measure_domain_sizes(domain_map: np.ndarray, a_nm: float = 350.0,
 
 def plot_polycrystal(phi_poly: np.ndarray, domain_map: np.ndarray,
                      P_values: np.ndarray, out_dir: Path):
+    """
+    Save a six-panel figure of the polycrystalline phase-field and domain map.
+
+    The top row shows three orthogonal mid-plane slices of the assembled
+    phase-field ``phi_poly``.  The bottom row shows the corresponding
+    Voronoi domain map coloured by domain ID.
+
+    Parameters
+    ----------
+    phi_poly : ndarray, shape (N, N, N)
+        Assembled polycrystalline scalar field.
+    domain_map : ndarray, shape (N, N, N), dtype int
+        Voronoi domain label for each voxel.
+    P_values : ndarray, shape (n_domains,)
+        Protein loading per domain (used for colour bar range).
+    out_dir : Path or str
+        Output directory for the saved figure.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -219,6 +337,26 @@ def plot_polycrystal(phi_poly: np.ndarray, domain_map: np.ndarray,
 
 def plot_domain_analysis(domain_map: np.ndarray, P_values: np.ndarray,
                          sizes_um: dict, out_dir: Path):
+    """
+    Save a three-panel domain analysis figure.
+
+    The three panels show:
+    1. Domain size distribution (bar chart with biological reference range).
+    2. Protein loading per domain (bar chart).
+    3. Domain size vs protein loading (scatter plot).
+
+    Parameters
+    ----------
+    domain_map : ndarray, shape (N, N, N), dtype int
+        Voronoi domain label for each voxel.
+    P_values : ndarray, shape (n_domains,)
+        Protein loading assigned to each domain.
+    sizes_um : dict
+        Mapping of ``{domain_id: size_um}`` as returned by
+        :func:`measure_domain_sizes`.
+    out_dir : Path or str
+        Output directory for the saved figure.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -265,7 +403,31 @@ def plot_domain_analysis(domain_map: np.ndarray, P_values: np.ndarray,
 def plot_stop_band_spread(phi_poly: np.ndarray, domain_map: np.ndarray,
                           P_values: np.ndarray, out_dir: Path):
     """
-    Compute per-domain stop bands and plot their spread (colour uniformity).
+    Compute per-domain stop bands and plot their spread as a colour uniformity metric.
+
+    For each domain, the phase-field is isolated, the photonic band structure
+    is computed using :func:`phase5_photonics.compute_band_structure`, and the
+    stop-band wavelength range is extracted.  The resulting horizontal bar chart
+    shows the stop-band spread across all domains, which is a proxy for the
+    colour uniformity of the polycrystalline wing scale.
+
+    Parameters
+    ----------
+    phi_poly : ndarray, shape (N, N, N)
+        Assembled polycrystalline scalar field.
+    domain_map : ndarray, shape (N, N, N), dtype int
+        Voronoi domain label for each voxel.
+    P_values : ndarray, shape (n_domains,)
+        Protein loading assigned to each domain.
+    out_dir : Path or str
+        Output directory for the saved figure.
+
+    Notes
+    -----
+    Domains with insufficient phase-field variance (``std < 0.01``) are
+    skipped to avoid numerical artefacts in the band structure calculation.
+    The physical lattice constant for each domain is estimated from the
+    Helfrich length at the domain's protein loading.
     """
     from phase5_photonics import compute_band_structure
     from phase4_scaling import helfrich_length, TARGET_NM

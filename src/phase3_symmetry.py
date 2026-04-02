@@ -37,12 +37,30 @@ from itertools import product
 
 def power_spectrum_1d(phi: np.ndarray, n_bins: int = 50):
     """
-    Compute the spherically averaged power spectrum of phi.
+    Compute the spherically averaged 1-D power spectrum of a 3-D field.
+
+    The 3-D power spectrum ``|phi_hat(k)|^2 / N^3`` is binned into
+    ``n_bins`` shells of equal width in ``|k|`` and averaged within
+    each shell.
+
+    Parameters
+    ----------
+    phi : ndarray, shape (N, N, N)
+        Real-valued order-parameter field on a periodic cubic grid.
+    n_bins : int, optional
+        Number of radial bins for the spherical average.  Default is 50.
 
     Returns
     -------
-    k_centers : ndarray
-    power : ndarray
+    k_centers : ndarray, shape (n_bins,)
+        Centre wavenumber of each radial bin (in grid units).
+    power : ndarray, shape (n_bins,)
+        Mean power in each radial bin.
+
+    Notes
+    -----
+    The DC component (``k = 0``) is included in the first bin.  For
+    morphology classification it is advisable to ignore this bin.
     """
     N = phi.shape[0]
     phi_hat = np.fft.fftn(phi)
@@ -65,8 +83,32 @@ def power_spectrum_1d(phi: np.ndarray, n_bins: int = 50):
     return k_centers, power
 
 
-def find_peaks_1d(k_centers, power, n_peaks: int = 3, min_sep: float = 1.5):
-    """Return indices of the n_peaks largest local maxima."""
+def find_peaks_1d(k_centers: np.ndarray, power: np.ndarray,
+                  n_peaks: int = 3, min_sep: float = 1.5) -> np.ndarray:
+    """
+    Return the indices of the ``n_peaks`` largest local maxima in a 1-D spectrum.
+
+    Uses ``scipy.signal.find_peaks`` with a minimum peak separation of
+    ``min_sep`` bins to avoid detecting noise fluctuations as peaks.
+
+    Parameters
+    ----------
+    k_centers : ndarray, shape (n_bins,)
+        Wavenumber axis of the power spectrum.
+    power : ndarray, shape (n_bins,)
+        Power values at each wavenumber bin.
+    n_peaks : int, optional
+        Maximum number of peaks to return.  Default is 3.
+    min_sep : float, optional
+        Minimum separation between peaks in units of bins.  Default is 1.5.
+
+    Returns
+    -------
+    peak_indices : ndarray
+        Indices (into ``k_centers`` and ``power``) of the detected peaks,
+        sorted by descending power.  If no peaks are found, the index of
+        the global maximum is returned.
+    """
     from scipy.signal import find_peaks as sp_find_peaks
     peaks, _ = sp_find_peaks(power, distance=int(min_sep))
     if len(peaks) == 0:
@@ -82,15 +124,51 @@ def find_peaks_1d(k_centers, power, n_peaks: int = 3, min_sep: float = 1.5):
 
 def euler_characteristic(phi: np.ndarray, threshold: float = 0.0) -> int:
     """
-    Estimate the Euler characteristic of the thresholded binary structure
-    using the voxel-counting formula on a periodic grid.
+    Estimate the Euler characteristic of the thresholded binary structure.
 
-    χ = V - E + F - C   (vertices, edges, faces, cells in cubical complex)
+    Uses the cubical complex formula on a periodic 3-D grid:
 
-    This is a simplified 3-D cubical complex formula.
+        chi = V - E + F - C
+
+    where V, E, F, C are the counts of vertices, edges, faces, and cells
+    in the cubical complex formed by the occupied (``phi > threshold``) voxels.
+
+    The Euler characteristic serves as a topological discriminator:
+
+    +------+------------------------------+
+    | chi  | Morphology                   |
+    +======+==============================+
+    | > 0  | Disconnected droplets        |
+    +------+------------------------------+
+    | ~ 0  | Lamellar                     |
+    +------+------------------------------+
+    | -4   | Gyroid (Ia3d)                |
+    +------+------------------------------+
+    | -8   | Double-diamond (Pn3m)        |
+    +------+------------------------------+
+    | << 0 | Disordered bicontinuous      |
+    +------+------------------------------+
+
+    Parameters
+    ----------
+    phi : ndarray, shape (N, N, N)
+        Order-parameter field on a periodic cubic grid.
+    threshold : float, optional
+        Iso-value used to binarise the field.  Voxels with
+        ``phi > threshold`` are considered occupied.  Default is 0.0.
+
+    Returns
+    -------
+    chi : int
+        Euler characteristic of the thresholded structure.
+
+    Notes
+    -----
+    This is a simplified voxel-counting formula that gives a qualitative
+    topological estimate.  For quantitatively accurate results, use a
+    proper cubical homology library (e.g., ``gudhi`` or ``scikit-tda``).
     """
     B = (phi > threshold).astype(np.int8)
-    N = B.shape[0]
 
     # Periodic roll
     def roll(a, shift, axis):
@@ -106,14 +184,14 @@ def euler_characteristic(phi: np.ndarray, threshold: float = 0.0) -> int:
         (B * roll(B, -1, 2)).sum()
     )
 
-    # Faces (F): 2×2 faces all = 1
+    # Faces (F): 2x2 faces all = 1
     F = int(
         (B * roll(B, -1, 0) * roll(B, -1, 1) * roll(roll(B, -1, 0), -1, 1)).sum() +
         (B * roll(B, -1, 0) * roll(B, -1, 2) * roll(roll(B, -1, 0), -1, 2)).sum() +
         (B * roll(B, -1, 1) * roll(B, -1, 2) * roll(roll(B, -1, 1), -1, 2)).sum()
     )
 
-    # Cells (C): 2×2×2 cubes all = 1
+    # Cells (C): 2x2x2 cubes all = 1
     C = int(
         (B *
          roll(B, -1, 0) *
@@ -140,16 +218,44 @@ DIAMOND_RATIO = np.sqrt(2) / np.sqrt(3)   # ≈ 0.816
 LAMELLAR_RATIO_MAX = 0.55                  # lamellar has very sharp single peak
 
 MORPHOLOGY_COLORS = {
-    'Lamellar': '#4878CF',
-    'Gyroid':   '#6ACC65',
-    'Diamond':  '#D65F5F',
+    'Lamellar':   '#4878CF',
+    'Gyroid':     '#6ACC65',
+    'Diamond':    '#D65F5F',
     'Disordered': '#B47CC7',
 }
 
 
 def classify_morphology(phi: np.ndarray, threshold: float = 0.0) -> str:
     """
-    Classify the morphology of the phase-field as L / G / D / X.
+    Classify the morphology of a phase-field as Lamellar, Gyroid, Diamond,
+    or Disordered.
+
+    The classification uses two complementary criteria:
+
+    1. **Euler characteristic** (topological): distinguishes bicontinuous
+       (chi < 0) from lamellar (chi ~ 0) and disordered (chi >> 0) phases.
+    2. **Peak ratio** (spectral): distinguishes gyroid from diamond by
+       comparing the ratio of the two dominant wavenumbers in the spherically
+       averaged power spectrum to the known TPMS values.
+
+    Parameters
+    ----------
+    phi : ndarray, shape (N, N, N)
+        Order-parameter field, as returned by :func:`phase2_curvature.run_with_curvature`.
+    threshold : float, optional
+        Iso-value for binarisation in the Euler characteristic calculation.
+        Default is 0.0.
+
+    Returns
+    -------
+    morphology : str
+        One of ``'Lamellar'``, ``'Gyroid'``, ``'Diamond'``, or ``'Disordered'``.
+
+    Notes
+    -----
+    The thresholds used for the Euler characteristic (chi < -10 for
+    bicontinuous, -10 <= chi <= 10 for lamellar) are empirical and may
+    need adjustment for grids smaller than N=32 or unusual parameter values.
     """
     k_centers, power = power_spectrum_1d(phi)
     peak_idx = find_peaks_1d(k_centers, power, n_peaks=3)
@@ -192,11 +298,34 @@ def build_phase_diagram(
     out_dir: Path = Path("figures"),
 ) -> dict:
     """
-    Sweep (P, lam) parameter space and classify each morphology.
+    Sweep the (P, lam) parameter space and classify the morphology at each point.
+
+    Runs one full phase-field simulation per (P, lam) combination and
+    classifies the resulting morphology using :func:`classify_morphology`.
+
+    Parameters
+    ----------
+    P_values : list of float
+        Protein loading values to sweep.  Each must be in [0, 1].
+    lam_values : list of float
+        Allen-Cahn interface width values to sweep.
+    N : int, optional
+        Number of grid points per spatial dimension.  Default is 48.
+    dt : float, optional
+        Time step size.  Default is 0.04.
+    n_steps : int, optional
+        Number of time steps per simulation.  Default is 1500.
+    seed : int, optional
+        Random seed for all initial conditions.  Default is 42.
+    out_dir : Path or str, optional
+        Directory in which to save the phase diagram figure.
+        Default is ``"figures"``.
 
     Returns
     -------
-    diagram : dict  {(P, lam): morphology_string}
+    diagram : dict
+        Mapping of ``{(P, lam): morphology_string}`` for each parameter
+        combination.
     """
     # Import here to avoid circular dependency
     from phase2_curvature import run_with_curvature
@@ -223,9 +352,23 @@ def build_phase_diagram(
 
 def _plot_phase_diagram(diagram: dict, P_values: list, lam_values: list,
                         out_dir: Path):
+    """
+    Save a scatter-plot phase diagram of morphology vs (P, lam).
+
+    Parameters
+    ----------
+    diagram : dict
+        Mapping of ``{(P, lam): morphology_string}``.
+    P_values : list of float
+        Protein loading values used in the sweep.
+    lam_values : list of float
+        Interface width values used in the sweep.
+    out_dir : Path
+        Output directory for the saved figure.
+    """
     fig, ax = plt.subplots(figsize=(7, 5))
 
-    color_map = {m: MORPHOLOGY_COLORS[m] for m in MORPHOLOGY_COLORS}
+    color_map  = {m: MORPHOLOGY_COLORS[m] for m in MORPHOLOGY_COLORS}
     marker_map = {'Lamellar': 's', 'Gyroid': 'o', 'Diamond': '^', 'Disordered': 'x'}
 
     for (P, lam), morph in diagram.items():
@@ -255,7 +398,15 @@ def _plot_phase_diagram(diagram: dict, P_values: list, lam_values: list,
 
 def plot_power_spectra(phi_dict: dict, out_dir: Path):
     """
-    Plot 1-D power spectra for a dict of {label: phi_array}.
+    Plot the 1-D spherically averaged power spectra for a set of phase fields.
+
+    Parameters
+    ----------
+    phi_dict : dict
+        Mapping of ``{label: phi_array}`` where each ``phi_array`` has
+        shape (N, N, N).
+    out_dir : Path or str
+        Output directory for the saved figure.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

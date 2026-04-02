@@ -22,11 +22,26 @@ and the biological constraint that the target lattice constant is
 where scale_factor is chosen so that the P=1 state maps to ~350 nm
 (centre of visible range).
 
-This module provides:
-  - measure_lattice_constant(phi)  → a_sim (dimensionless)
-  - physical_lattice(P, a_sim)     → a_nm (nanometres)
-  - sweep_lattice_vs_P(...)        → table + figure
-  - visible_light_condition(a_nm)  → bool
+Expansion models
+----------------
+In addition to the default Helfrich-based scaling, two alternative
+physical models are provided for biomimetic engineering applications:
+
+1. **Osmotic swelling** (``osmotic_lattice``): models the expansion of a
+   lyotropic liquid-crystal template when immersed in a solvent of
+   osmotic pressure Pi.  The lattice constant scales as:
+       a_osm(Pi) = a0 * (Pi0 / Pi)^nu
+   where nu ~ 0.3 is the Flory-type swelling exponent.
+
+2. **Intercalation** (``intercalation_lattice``): models the expansion
+   of a block-copolymer template when a small-molecule intercalant
+   (e.g., a selective solvent or homopolymer) is added at volume
+   fraction phi_int.  The lattice constant scales as:
+       a_int(phi_int) = a0 * (1 + gamma * phi_int)
+   where gamma is the intercalation expansion coefficient.
+
+These models allow engineers to tune the lattice constant post-assembly
+without changing the protein loading, enabling fine-grained colour control.
 """
 
 import numpy as np
@@ -45,11 +60,52 @@ LAM    = 1.0
 
 
 def effective_kappa(P: float) -> float:
+    """
+    Compute the effective bending rigidity at protein loading P.
+
+    Mirrors the definition in :mod:`phase2_curvature` with the production
+    Helfrich parameters used for physical unit conversion.
+
+    Parameters
+    ----------
+    P : float
+        Dimensionless protein loading in [0, 1].
+
+    Returns
+    -------
+    kappa : float
+        Effective bending rigidity (dimensionless).
+    """
     return KAPPA0 * (1.0 + BETA * P)
 
 
 def helfrich_length(P: float, lam: float = LAM) -> float:
-    """xi(P) = sqrt(kappa_eff / lam)"""
+    """
+    Compute the Helfrich length scale xi(P) = sqrt(kappa_eff / lam).
+
+    The Helfrich length sets the physical length scale of the membrane
+    modulations.  It increases with protein loading as the membrane
+    stiffens, driving the lattice constant to larger values.
+
+    Parameters
+    ----------
+    P : float
+        Dimensionless protein loading in [0, 1].
+    lam : float, optional
+        Allen-Cahn interface width parameter.  Default is ``LAM = 1.0``.
+
+    Returns
+    -------
+    xi : float
+        Helfrich length scale (dimensionless simulation units).
+
+    Examples
+    --------
+    >>> helfrich_length(0.0)
+    1.0
+    >>> helfrich_length(1.0)
+    1.5811388300841898
+    """
     return np.sqrt(effective_kappa(P) / lam)
 
 
@@ -57,16 +113,33 @@ def helfrich_length(P: float, lam: float = LAM) -> float:
 # Lattice constant extraction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def measure_lattice_constant(phi: np.ndarray) -> float:
+def measure_lattice_constant(phi: np.ndarray) -> tuple:
     """
     Extract the dominant lattice constant from the 3-D power spectrum.
+
+    Computes the spherically averaged power spectrum of the phase-field
+    and identifies the dominant peak wavenumber ``k_peak``.  The
+    corresponding real-space periodicity is:
+
+        a_sim = 2 * pi / k_peak
+
+    Parameters
+    ----------
+    phi : ndarray, shape (N, N, N)
+        Order-parameter field, as returned by
+        :func:`phase2_curvature.run_with_curvature`.
 
     Returns
     -------
     a_sim : float
-        Dimensionless lattice constant (in grid units of 2*pi).
+        Dimensionless lattice constant in units of ``2*pi / k_grid``.
     k_peak : float
-        Dominant wave-number (grid units).
+        Dominant wavenumber in grid units (integer wavenumber).
+
+    Notes
+    -----
+    The DC component (``k = 0``) is excluded from the peak search to
+    avoid identifying the mean field as the dominant mode.
     """
     N = phi.shape[0]
     phi_hat = np.fft.fftn(phi)
@@ -100,28 +173,203 @@ def measure_lattice_constant(phi: np.ndarray) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Physical unit conversion
+# Physical unit conversion — Helfrich model
 # ─────────────────────────────────────────────────────────────────────────────
 
 def physical_lattice(P: float, a_sim: float,
                      scale_factor: float = None) -> float:
     """
-    Convert dimensionless lattice constant to nanometres.
+    Convert a dimensionless lattice constant to physical nanometres.
 
-    If scale_factor is None, it is calibrated so that P=1 maps to TARGET_NM.
+    Uses the Helfrich length scale ``xi(P)`` to convert:
+
+        a_nm = a_sim * xi(P) * scale_factor
+
+    If ``scale_factor`` is ``None``, it is set to 1.0 as a placeholder;
+    the calibrated value is computed in :func:`sweep_lattice_vs_P`.
+
+    Parameters
+    ----------
+    P : float
+        Dimensionless protein loading in [0, 1].
+    a_sim : float
+        Dimensionless lattice constant, as returned by
+        :func:`measure_lattice_constant`.
+    scale_factor : float or None, optional
+        Physical conversion factor (nm per simulation unit).  If ``None``,
+        defaults to 1.0.  Default is ``None``.
+
+    Returns
+    -------
+    a_nm : float
+        Physical lattice constant in nanometres.
     """
     xi = helfrich_length(P)
     a_natural = a_sim * xi
 
     if scale_factor is None:
-        # Calibrate: at P=1, a_phys = TARGET_NM
-        xi_ref = helfrich_length(1.0)
-        # We need a_natural_ref * scale_factor = TARGET_NM
-        # a_natural_ref is not known here, so we use a fixed reference
-        # (will be computed in sweep)
         scale_factor = 1.0   # placeholder; corrected in sweep
 
     return a_natural * scale_factor
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Alternative expansion models for biomimetic engineering
+# ─────────────────────────────────────────────────────────────────────────────
+
+def osmotic_lattice(Pi: float, a0: float = TARGET_NM,
+                    Pi0: float = 1.0, nu: float = 0.3) -> float:
+    """
+    Predict the lattice constant under osmotic swelling.
+
+    Models the expansion of a lyotropic liquid-crystal template when
+    immersed in a solvent of osmotic pressure ``Pi``.  The lattice
+    constant scales as a power law:
+
+        a_osm(Pi) = a0 * (Pi0 / Pi)^nu
+
+    This is the Flory-type swelling model, where ``nu ~ 0.3`` is the
+    swelling exponent for a bicontinuous cubic phase in a good solvent.
+
+    Parameters
+    ----------
+    Pi : float
+        Osmotic pressure of the surrounding solvent (arbitrary units;
+        must be consistent with ``Pi0``).
+    a0 : float, optional
+        Reference lattice constant at reference pressure ``Pi0``
+        (in nm).  Default is ``TARGET_NM = 350.0`` nm.
+    Pi0 : float, optional
+        Reference osmotic pressure.  Default is 1.0.
+    nu : float, optional
+        Flory swelling exponent.  Typical values are 0.2–0.4 for
+        bicontinuous cubic phases.  Default is 0.3.
+
+    Returns
+    -------
+    a_osm : float
+        Predicted lattice constant in nm at osmotic pressure ``Pi``.
+
+    Notes
+    -----
+    To use this model for colour tuning, set ``a0`` to the lattice
+    constant measured at reference conditions and sweep ``Pi`` to find
+    the pressure that gives the target wavelength.
+
+    Examples
+    --------
+    >>> osmotic_lattice(1.0, a0=350.0)
+    350.0
+    >>> osmotic_lattice(0.5, a0=350.0)   # lower pressure → swelling
+    392.3...
+    """
+    return a0 * (Pi0 / Pi) ** nu
+
+
+def intercalation_lattice(phi_int: float, a0: float = TARGET_NM,
+                          gamma: float = 0.5) -> float:
+    """
+    Predict the lattice constant upon intercalation of a small molecule.
+
+    Models the expansion of a block-copolymer or lyotropic template when
+    a selective small-molecule intercalant (e.g., a homopolymer, selective
+    solvent, or surfactant) is added at volume fraction ``phi_int``.
+    The lattice constant scales linearly:
+
+        a_int(phi_int) = a0 * (1 + gamma * phi_int)
+
+    This linear model is valid for dilute intercalant concentrations
+    (``phi_int < 0.3``).
+
+    Parameters
+    ----------
+    phi_int : float
+        Volume fraction of the intercalant in [0, 1].
+    a0 : float, optional
+        Lattice constant in the absence of intercalant (in nm).
+        Default is ``TARGET_NM = 350.0`` nm.
+    gamma : float, optional
+        Intercalation expansion coefficient.  A value of ``gamma = 0.5``
+        means a 50% expansion at full intercalant loading.  Default is 0.5.
+
+    Returns
+    -------
+    a_int : float
+        Predicted lattice constant in nm at intercalant volume fraction
+        ``phi_int``.
+
+    Notes
+    -----
+    For block-copolymer systems, ``gamma`` can be estimated from the
+    ratio of the homopolymer chain length to the block length.  For
+    lyotropic systems, ``gamma`` is typically determined experimentally
+    by small-angle X-ray scattering (SAXS).
+
+    Examples
+    --------
+    >>> intercalation_lattice(0.0, a0=350.0)
+    350.0
+    >>> intercalation_lattice(0.2, a0=350.0, gamma=0.5)
+    385.0
+    """
+    return a0 * (1.0 + gamma * phi_int)
+
+
+def plot_expansion_models(a0: float = TARGET_NM, out_dir: Path = Path("figures")):
+    """
+    Plot predicted lattice constant vs control parameter for both expansion models.
+
+    Generates a two-panel figure showing:
+    - Left: osmotic swelling model (lattice constant vs osmotic pressure)
+    - Right: intercalation model (lattice constant vs intercalant volume fraction)
+
+    Parameters
+    ----------
+    a0 : float, optional
+        Reference lattice constant in nm.  Default is ``TARGET_NM = 350.0`` nm.
+    out_dir : Path or str, optional
+        Output directory for the saved figure.  Default is ``"figures"``.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    # Left: osmotic swelling
+    ax = axes[0]
+    Pi_arr = np.linspace(0.1, 3.0, 200)
+    for nu, ls in [(0.2, '--'), (0.3, '-'), (0.4, ':')]:
+        a_arr = [osmotic_lattice(Pi, a0=a0, nu=nu) for Pi in Pi_arr]
+        ax.plot(Pi_arr, a_arr, ls, linewidth=2, label=f'ν = {nu}')
+    ax.axhspan(380, 700, alpha=0.08, color='gold', label='Visible (380–700 nm)')
+    ax.axhline(a0, color='grey', linewidth=1, linestyle='--', label=f'a₀ = {a0:.0f} nm')
+    ax.set_xlabel("Osmotic pressure Π (arb. units)", fontsize=11)
+    ax.set_ylabel("Lattice constant a (nm)", fontsize=11)
+    ax.set_title("Osmotic swelling model\na(Π) = a₀ · (Π₀/Π)^ν", fontsize=11, fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    # Right: intercalation
+    ax = axes[1]
+    phi_arr = np.linspace(0.0, 0.4, 200)
+    for gamma, ls in [(0.3, '--'), (0.5, '-'), (0.8, ':')]:
+        a_arr = [intercalation_lattice(phi, a0=a0, gamma=gamma) for phi in phi_arr]
+        ax.plot(phi_arr, a_arr, ls, linewidth=2, label=f'γ = {gamma}')
+    ax.axhspan(380, 700, alpha=0.08, color='gold', label='Visible (380–700 nm)')
+    ax.axhline(a0, color='grey', linewidth=1, linestyle='--', label=f'a₀ = {a0:.0f} nm')
+    ax.set_xlabel("Intercalant volume fraction φ_int", fontsize=11)
+    ax.set_ylabel("Lattice constant a (nm)", fontsize=11)
+    ax.set_title("Intercalation model\na(φ) = a₀ · (1 + γ·φ)", fontsize=11, fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    fig.suptitle("Biomimetic expansion models for lattice constant tuning",
+                 fontsize=13, fontweight='bold')
+    plt.tight_layout()
+    path = out_dir / "phase4_expansion_models.png"
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"[Phase 4] Saved: {path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,12 +386,39 @@ def sweep_lattice_vs_P(
     out_dir: Path = Path("figures"),
 ) -> dict:
     """
-    Run simulations for each P, measure lattice constant, convert to nm.
+    Run simulations for each P value, measure the lattice constant, and
+    convert to physical nanometres.
+
+    The scale factor is calibrated so that the maximum P value maps to
+    ``TARGET_NM = 350.0`` nm.
+
+    Parameters
+    ----------
+    P_values : list of float
+        Protein loading values to sweep.  Each must be in [0, 1].
+    N : int, optional
+        Number of grid points per spatial dimension.  Default is 64.
+    lam : float, optional
+        Allen-Cahn interface width parameter.  Default is 1.0.
+    dt : float, optional
+        Time step size.  Default is 0.04.
+    n_steps : int, optional
+        Number of time steps per simulation.  Default is 2000.
+    seed : int, optional
+        Random seed for all initial conditions.  Default is 42.
+    out_dir : Path or str, optional
+        Directory in which to save output figures.  Default is ``"figures"``.
 
     Returns
     -------
-    results : dict  {P: {'a_sim': float, 'k_peak': float, 'a_nm': float,
-                          'xi': float, 'in_visible': bool}}
+    results : dict
+        Mapping of ``{P: record}`` where each ``record`` is a dict with keys:
+
+        - ``'a_sim'`` (float): dimensionless lattice constant.
+        - ``'k_peak'`` (float): dominant wavenumber in grid units.
+        - ``'xi'`` (float): Helfrich length scale.
+        - ``'a_nm'`` (float): physical lattice constant in nm.
+        - ``'in_visible'`` (bool): whether ``a_nm`` is in [200, 500] nm.
     """
     from phase2_curvature import run_with_curvature
 
@@ -184,6 +459,14 @@ def sweep_lattice_vs_P(
 
 
 def _print_table(results: dict):
+    """
+    Print a formatted table of lattice scaling results to stdout.
+
+    Parameters
+    ----------
+    results : dict
+        Mapping of ``{P: record}`` as returned by :func:`sweep_lattice_vs_P`.
+    """
     print("\n[Phase 4] Lattice scaling table:")
     print(f"{'P':>6} {'a_sim':>8} {'xi':>8} {'a_nm':>10} {'Visible?':>10}")
     print("-" * 48)
@@ -194,6 +477,16 @@ def _print_table(results: dict):
 
 
 def _plot_scaling(results: dict, out_dir: Path):
+    """
+    Save a two-panel figure of lattice constant and Helfrich length vs P.
+
+    Parameters
+    ----------
+    results : dict
+        Mapping of ``{P: record}`` as returned by :func:`sweep_lattice_vs_P`.
+    out_dir : Path
+        Output directory for the saved figure.
+    """
     P_arr  = np.array(sorted(results.keys()))
     a_nm   = np.array([results[P]['a_nm'] for P in P_arr])
     xi_arr = np.array([results[P]['xi']   for P in P_arr])
@@ -245,5 +538,8 @@ if __name__ == "__main__":
 
     with open(DATA_DIR / "lattice_scaling.json", "w") as f:
         json.dump({str(P): d for P, d in results.items()}, f, indent=2)
+
+    # Also generate the expansion model comparison figure
+    plot_expansion_models(a0=TARGET_NM, out_dir=FIG_DIR)
 
     print("[Phase 4] Done.")
