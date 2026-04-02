@@ -43,10 +43,29 @@ from pathlib import Path
 
 def make_k2(N: int) -> np.ndarray:
     """
-    Return k2 = -|k|^2 on an N^3 grid with integer wavenumbers k in [0,N).
+    Return the Laplacian eigenvalue array ``k2 = -|k|^2`` on an N^3 periodic grid.
 
-    Uses np.fft.fftfreq convention so k in [-N/2, N/2).
-    The Laplacian eigenvalue is -(2*pi/N)^2 * |k_int|^2.
+    Uses the ``np.fft.fftfreq`` convention so integer wavenumbers lie in
+    ``[-N/2, N/2)``.  The physical Laplacian eigenvalue is
+    ``-(2*pi/N)^2 * |k_int|^2``.
+
+    Parameters
+    ----------
+    N : int
+        Number of grid points per spatial dimension.
+
+    Returns
+    -------
+    k2 : ndarray, shape (N, N, N)
+        Laplacian eigenvalue array; all entries are <= 0.
+
+    Examples
+    --------
+    >>> k2 = make_k2(32)
+    >>> k2.shape
+    (32, 32, 32)
+    >>> float(k2[0, 0, 0])   # DC mode has zero Laplacian
+    0.0
     """
     k1d = np.fft.fftfreq(N, d=1.0 / N)          # integer wavenumbers
     KX, KY, KZ = np.meshgrid(k1d, k1d, k1d, indexing='ij')
@@ -61,15 +80,35 @@ def make_k2(N: int) -> np.ndarray:
 def gyroid_seed(N: int, A0: float = 0.5, noise: float = 0.02,
                 seed: int = 42, n_modes: int = 2) -> np.ndarray:
     """
-    Generate a gyroid-inspired initial condition.
+    Generate a gyroid-inspired initial condition for the phase-field.
 
-    phi_0(r) = A0*[cos(m*x)sin(m*y) + cos(m*y)sin(m*z) + cos(m*z)sin(m*x)]
-               + noise * randn
+    The field is initialised as a cosine superposition that approximates
+    the gyroid level-set surface, providing immediate bicontinuous structure
+    at any grid resolution:
+
+        phi_0(r) = A0 * [cos(m*x)*sin(m*y) + cos(m*y)*sin(m*z)
+                         + cos(m*z)*sin(m*x)] + noise * randn
 
     Parameters
     ----------
-    n_modes : int
-        Spatial frequency multiplier (2 = two periods per box).
+    N : int
+        Number of grid points per spatial dimension.
+    A0 : float, optional
+        Amplitude of the gyroid template.  Default is 0.5.
+    noise : float, optional
+        Standard deviation of additive Gaussian noise that breaks exact
+        symmetry and allows the simulation to explore the full landscape.
+        Default is 0.02.
+    seed : int, optional
+        Random seed for reproducibility.  Default is 42.
+    n_modes : int, optional
+        Spatial frequency multiplier; ``n_modes=2`` places two full periods
+        per simulation box.  Default is 2.
+
+    Returns
+    -------
+    phi : ndarray, shape (N, N, N)
+        Initial order-parameter field with values in approximately [-A0, A0].
     """
     x = np.linspace(0, 2 * np.pi, N, endpoint=False)
     X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
@@ -91,24 +130,39 @@ def step_allen_cahn(phi_hat: np.ndarray,
                     lam: float,
                     dt: float) -> np.ndarray:
     """
-    One semi-implicit Euler step of the Allen-Cahn equation.
+    Perform one semi-implicit Euler step of the Allen-Cahn equation.
 
-    d phi/dt = lam*nabla^2 phi + phi - phi^3
+    The equation evolved is:
 
-    Semi-implicit (linear terms implicit, cubic explicit):
-        phi_hat^{n+1} = (phi_hat^n + dt*(-phi^3)_hat^n)
-                        / (1 - dt*(lam*k2 + 1))
+        d phi/dt = lam * nabla^2 phi + phi - phi^3
+
+    Linear terms are treated implicitly and the cubic nonlinearity
+    is treated explicitly:
+
+        phi_hat^{n+1} = (phi_hat^n + dt * (-phi^3)_hat^n)
+                        / (1 - dt * (lam * k2 + 1))
+
+    The denominator is always positive for physically relevant modes,
+    ensuring unconditional stability of the linear part.
 
     Parameters
     ----------
-    phi_hat : complex ndarray
-        Fourier transform of phi.
-    k2 : ndarray
-        Laplacian eigenvalue array (-|k|^2 <= 0).
+    phi_hat : ndarray, shape (N, N, N), complex
+        Fourier transform of the current order-parameter field ``phi``.
+    k2 : ndarray, shape (N, N, N)
+        Laplacian eigenvalue array (``-|k|^2 <= 0``), as returned by
+        :func:`make_k2`.
     lam : float
-        Interface width parameter.
+        Interface width (gradient penalty) parameter.  Larger values produce
+        wider interfaces and slower dynamics.
     dt : float
-        Time step.
+        Time step size.  A value of ``dt = 0.05`` is safe for typical
+        parameter ranges.
+
+    Returns
+    -------
+    phi_hat_new : ndarray, shape (N, N, N), complex
+        Fourier transform of the updated field after one time step.
     """
     phi = np.real(np.fft.ifftn(phi_hat))
     nl_hat = np.fft.fftn(-phi**3)
@@ -134,12 +188,40 @@ def run_baseline(
     """
     Run the baseline (protein-free) Allen-Cahn phase-field simulation.
 
-    Uses a gyroid-seeded initial condition for immediate bicontinuous structure.
+    Uses a gyroid-seeded initial condition for immediate bicontinuous
+    structure.  Snapshots are saved at t = 0, n_steps/4, n_steps/2,
+    and n_steps.
+
+    Parameters
+    ----------
+    N : int, optional
+        Number of grid points per spatial dimension.  Total grid is N^3.
+        Default is 64.
+    lam : float, optional
+        Allen-Cahn interface width parameter.  Default is 0.1.
+    dt : float, optional
+        Time step size.  Default is 0.05.
+    n_steps : int, optional
+        Number of time steps to evolve.  Default is 500.
+    seed : int, optional
+        Random seed for the initial condition.  Default is 42.
+    save_snapshots : bool, optional
+        If True, save a figure of phase-field snapshots at four time points.
+        Default is True.
+    out_dir : Path or str, optional
+        Directory in which to save output figures.  Default is ``"figures"``.
 
     Returns
     -------
     phi : ndarray, shape (N, N, N)
-        Final scalar field (values near ±1 in bulk, 0 at interface).
+        Final scalar field.  Values are near +1 in the chitin-rich phase,
+        near -1 in the air phase, and near 0 at the interface.
+
+    Notes
+    -----
+    For production runs, use ``N >= 128`` and ``n_steps >= 5000`` to obtain
+    well-converged bicontinuous morphologies.  The demo uses ``N=32`` and
+    ``n_steps=200`` for speed.
     """
     phi = gyroid_seed(N, A0=0.5, noise=0.02, seed=seed)
     k2  = make_k2(N)
@@ -167,6 +249,18 @@ def run_baseline(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _plot_snapshots(snapshots: dict, out_dir: Path, tag: str = ""):
+    """
+    Save a figure of mid-plane slices at each snapshot time step.
+
+    Parameters
+    ----------
+    snapshots : dict
+        Mapping of ``{step: phi_array}`` for each saved time step.
+    out_dir : Path
+        Output directory for the saved figure.
+    tag : str, optional
+        Label appended to the output filename.  Default is ``""``.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -195,7 +289,22 @@ def _plot_snapshots(snapshots: dict, out_dir: Path, tag: str = ""):
 
 
 def plot_isosurface_slice(phi: np.ndarray, out_dir: Path, tag: str = "baseline"):
-    """Plot three orthogonal mid-plane slices of the final field."""
+    """
+    Plot three orthogonal mid-plane slices of the final phase-field.
+
+    Slices are taken at ``x = N/2``, ``y = N/2``, and ``z = N/2`` and
+    displayed using the ``RdBu_r`` colormap with the range [-1.2, 1.2].
+
+    Parameters
+    ----------
+    phi : ndarray, shape (N, N, N)
+        Final order-parameter field, as returned by :func:`run_baseline`.
+    out_dir : Path or str
+        Output directory for the saved figure.
+    tag : str, optional
+        Label appended to the output filename and figure title.
+        Default is ``"baseline"``.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
