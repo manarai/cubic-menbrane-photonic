@@ -24,6 +24,43 @@ Membrane protein density P
 Each phase is implemented as an independent, well-documented Python module in `src/`, and a complete interactive demonstration is provided as a Jupyter Notebook (`Demo.ipynb`).
 
 ---
+## Biological Interpretation of Model Parameters
+
+This simulation is designed to test a mechanistic hypothesis for beetle photonic
+crystal formation based on cubic membrane templating. All geometric and physical
+parameters correspond to biologically interpretable processes rather than free
+fitting parameters.
+
+- Membrane protein loading `P`  
+  Represents the local density of curvature-inducing membrane-associated
+  proteins during scale cell development.
+
+- Spontaneous curvature `H_0(P)`  
+  Encodes protein-driven curvature bias arising from asymmetric lipid–protein
+  interactions within intracellular membranes.
+
+- Phase-field order parameter `φ(r)`  
+  Represents local membrane occupancy, separating the system into two
+  interpenetrating membrane-associated domains.
+
+- TPMS level-set topology (gyroid / diamond)  
+  Corresponds to energetically preferred cubic membrane morphologies arising
+  from curvature frustration under confinement.
+
+- Lattice constant `a`  
+  Represents the characteristic spacing of the cubic membrane network.
+  Developmental lattice expansion into the 200–500 nm range enables interaction
+  with visible light.
+
+- Dielectric contrast (`ε_chitin`, `ε_air`)  
+  Represents selective chitin deposition into one membrane labyrinth followed
+  by membrane degradation.
+
+- Domain size and orientation  
+  Model polycrystalline scale architectures arising from multiple independent
+  nucleation sites during development.
+
+---
 
 ## Repository Structure
 
