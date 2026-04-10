@@ -1,0 +1,16 @@
+name: cubic-membrane-photonics
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy>=1.24
+  - scipy>=1.11
+  - matplotlib>=3.7
+  - jupyter>=1.0
+  - jupyterlab>=4.0
+  - ipykernel>=6.0
+  - ipywidgets>=8.0
+  - pip
+  - pip:
+      - nbformat>=5.9
